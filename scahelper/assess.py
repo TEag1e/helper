@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -153,7 +154,7 @@ def detect_ecosystem(name: str) -> str:
         return "npm"
     if ":" in name:
         return "maven"
-    raise SystemExit("无法判断生态，请使用 --ecosystem")
+    raise ValueError("无法判断生态，请使用 --ecosystem")
 
 
 def package_artifact(name: str) -> str:
@@ -653,17 +654,65 @@ def to_json(result: Result) -> dict[str, Any]:
     }
 
 
+def load_packages(path: str) -> list[str]:
+    pkgs = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        name = line.strip()
+        if name and not name.startswith("#"):
+            pkgs.append(name)
+    if not pkgs:
+        raise SystemExit(f"文件为空: {path}")
+    return pkgs
+
+
+def assess_one(package: str, ecosystem_arg: str | None, chrome: str | None, skip_avd: bool) -> Result:
+    try:
+        ecosystem = ecosystem_arg or detect_ecosystem(package)
+    except ValueError as exc:
+        return Result(package=package, ecosystem="", risk="失败", risk_range="", reason=str(exc))
+    try:
+        return assess(package, ecosystem, chrome, skip_avd)
+    except Exception as exc:
+        return Result(package=package, ecosystem=ecosystem, risk="失败", risk_range="", reason=str(exc))
+
+
+def write_csv_row(writer: csv.writer, result: Result) -> None:
+    writer.writerow([result.package, result.ecosystem, result.risk, result.risk_range, result.reason])
+
+
+def run_batch(packages: list[str], ecosystem: str | None, chrome: str | None, skip_avd: bool) -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    writer = csv.writer(sys.stdout, lineterminator="\n")
+    writer.writerow(["依赖名称", "生态", "风险程度", "风险版本", "原因"])
+    total = len(packages)
+    for i, package in enumerate(packages, 1):
+        print(f"[{i}/{total}] {package}", file=sys.stderr)
+        write_csv_row(writer, assess_one(package, ecosystem, chrome, skip_avd))
+        sys.stdout.flush()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="评估依赖风险程度")
-    parser.add_argument("package", help="依赖坐标，如 com.alibaba:fastjson")
+    parser.add_argument("package", nargs="?", help="依赖坐标，如 com.alibaba:fastjson")
+    parser.add_argument("-f", "--file", help="批量查询文件，每行一个依赖名称")
     parser.add_argument("--ecosystem", choices=ECOSYSTEMS)
     parser.add_argument("--chrome", help="Chrome/Edge 可执行文件路径")
     parser.add_argument("--skip-avd", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if bool(args.package) == bool(args.file):
+        parser.error("请指定 package 或 --file")
 
-    ecosystem = args.ecosystem or detect_ecosystem(args.package)
     chrome = None if args.skip_avd else find_chrome(args.chrome)
+    if args.file:
+        run_batch(load_packages(args.file), args.ecosystem, chrome, args.skip_avd)
+        return
+
+    try:
+        ecosystem = args.ecosystem or detect_ecosystem(args.package)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     result = assess(args.package, ecosystem, chrome, args.skip_avd)
     if args.json:
         print(json.dumps(to_json(result), ensure_ascii=False, indent=2))
