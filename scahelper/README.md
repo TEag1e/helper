@@ -36,3 +36,8 @@
 4. 去AVD平台的漏洞详情页拿漏洞等级。
 5. 根据评估策略输出依赖的风险程度，以及最高风险的版本范围，原因。
 
+## 使用效果
+
+<img width="1058" height="166" alt="image" src="https://github.com/user-attachments/assets/4ffef97b-6b80-49ca-93ea-490dda2857d6" />
+
+
