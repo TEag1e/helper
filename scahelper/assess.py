@@ -680,22 +680,35 @@ def write_csv_row(writer: csv.writer, result: Result) -> None:
     writer.writerow([result.package, result.ecosystem, result.risk, result.risk_range, result.reason])
 
 
-def run_batch(packages: list[str], ecosystem: str | None, chrome: str | None, skip_avd: bool) -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    writer = csv.writer(sys.stdout, lineterminator="\n")
-    writer.writerow(["依赖名称", "生态", "风险程度", "风险版本", "原因"])
-    total = len(packages)
-    for i, package in enumerate(packages, 1):
-        print(f"[{i}/{total}] {package}", file=sys.stderr)
-        write_csv_row(writer, assess_one(package, ecosystem, chrome, skip_avd))
-        sys.stdout.flush()
+def default_csv_path(src: str) -> Path:
+    p = Path(src)
+    return p.with_suffix(".csv") if p.suffix.lower() != ".csv" else p.with_name(f"{p.stem}_result.csv")
+
+
+def run_batch(
+    packages: list[str],
+    ecosystem: str | None,
+    chrome: str | None,
+    skip_avd: bool,
+    out_path: Path,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["依赖名称", "生态", "风险程度", "风险版本", "原因"])
+        total = len(packages)
+        for i, package in enumerate(packages, 1):
+            print(f"[{i}/{total}] {package}", file=sys.stderr)
+            write_csv_row(writer, assess_one(package, ecosystem, chrome, skip_avd))
+            fh.flush()
+    print(f"已写入 {out_path}", file=sys.stderr)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="评估依赖风险程度")
     parser.add_argument("package", nargs="?", help="依赖坐标，如 com.alibaba:fastjson")
     parser.add_argument("-f", "--file", help="批量查询文件，每行一个依赖名称")
+    parser.add_argument("-o", "--output", help="批量结果 CSV 路径")
     parser.add_argument("--ecosystem", choices=ECOSYSTEMS)
     parser.add_argument("--chrome", help="Chrome/Edge 可执行文件路径")
     parser.add_argument("--skip-avd", action="store_true")
@@ -706,7 +719,8 @@ def main() -> None:
 
     chrome = None if args.skip_avd else find_chrome(args.chrome)
     if args.file:
-        run_batch(load_packages(args.file), args.ecosystem, chrome, args.skip_avd)
+        out = Path(args.output) if args.output else default_csv_path(args.file)
+        run_batch(load_packages(args.file), args.ecosystem, chrome, args.skip_avd, out)
         return
 
     try:
