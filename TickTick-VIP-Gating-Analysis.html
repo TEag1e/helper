@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TickTick.exe 普通用户 / VIP 功能限制机制分析</title>
+<style>
+  :root { --ink:#1a1d21; --sub:#5b6470; --faint:#8a93a0; --line:#e3e6ea; --bg:#ffffff; --soft:#f6f7f9; --accent:#b3261e; --warn:#9a6a00; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--soft); color:var(--ink);
+         font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  .page { max-width:980px; margin:0 auto; padding:40px 28px 64px; background:var(--bg); }
+  h1 { font-size:24px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:36px 0 12px; padding-bottom:6px; border-bottom:2px solid var(--ink); }
+  h3 { font-size:15px; margin:20px 0 8px; }
+  .meta { color:var(--sub); font-size:13px; }
+  .banner { border:1px solid #e5b6b3; background:#fdf3f2; border-left:4px solid var(--accent);
+            border-radius:6px; padding:14px 16px; margin:20px 0; }
+  .banner.warn { border-color:#e8d9ae; background:#fdf9ec; border-left-color:var(--warn); }
+  .banner b { color:var(--accent); }
+  .banner.warn b { color:var(--warn); }
+  .stats { display:flex; gap:32px; margin:18px 0 4px; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--sub); font-size:12.5px; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:8px 0; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--sub); font-weight:600; font-size:12.5px; background:var(--soft); }
+  code, pre { font:12.5px/1.6 Consolas,"Cascadia Mono",monospace; }
+  pre { background:var(--soft); border:1px solid var(--line); border-radius:6px; padding:12px 14px; overflow-x:auto; margin:6px 0; }
+  .fn { border:1px solid var(--line); border-radius:8px; margin:12px 0; }
+  .fn .head { display:flex; justify-content:space-between; gap:12px; padding:8px 14px;
+              border-bottom:1px solid var(--line); font-size:13px; font-weight:600; }
+  .fn .head .tok { color:var(--faint); font-weight:400; font-family:Consolas,monospace; font-size:12px; }
+  .fn .body { padding:12px 14px; }
+  .fn .note { color:var(--sub); font-size:12.5px; margin-top:8px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  .panel { border:1px solid var(--line); border-radius:8px; padding:4px 14px 12px; }
+  .panel h3 { margin:10px 0 6px; }
+  .foot { color:var(--faint); font-size:12px; margin-top:28px; line-height:1.8; }
+  @media (max-width:760px){ .grid2{grid-template-columns:1fr;} .stats{flex-wrap:wrap;} }
+  @media print { body{background:#fff;} .page{padding:0;} }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>TickTick.exe 普通用户 / VIP 功能限制机制分析</h1>
+<div class="meta">目标 ticktick_WPF 8.0.2.0 · SHA-256 <code>26f72e6f…769593</code> · 静态分析（未执行目标）· REA rea-dotnet-static provider + CIL 元数据解码 · 2026-10-12</div>
+
+<div class="banner">
+  <b>核心结论：功能限制完全建立在客户端信任之上。</b>
+  本地唯一事实来源是 <b>UserModel.proEndDate / pro / teamPro</b> 等字段（服务端同步后缓存于本地），三个判定函数仅做
+  <b>DateTime.Now 本地比较</b>——无签名、无防篡改、无逐功能服务端鉴权。修改本地用户记录或补丁两个返回指令即可解除全部 UI 层限制；
+  数据写入类限制（清单数量、日历订阅数）由服务端 API 二次校验，不在客户端控制面内。
+</div>
+
+<div class="stats">
+  <div class="stat"><b>3</b><span>VIP 判定函数（IsFreeUser / ProExpired / InGraceDate）</span></div>
+  <div class="stat"><b>7+</b><span>受门控的 Pro 功能面</span></div>
+  <div class="stat"><b>0</b><span>判定中的服务端校验 / 签名校验</span></div>
+</div>
+
+<h2>程序架构与 VIP 状态数据模型</h2>
+<div class="grid2">
+  <div class="panel">
+    <h3>三层架构（VIP 判定位于 UI 层）</h3>
+    <table>
+      <tr><th>层</th><th>组件</th><th>角色</th></tr>
+      <tr><td>UI / 业务</td><td>TickTick.exe（C# WPF，31 MB）</td><td>全部 VIP 判定与功能门控在此</td></tr>
+      <tr><td>互操作桥</td><td>TickTickHandler.dll（C++/CLI）</td><td>kref 包装，无 VIP 逻辑</td></tr>
+      <tr><td>共享核心</td><td>KotlinMultiplatformAll.dll（Kotlin/Native）</td><td>任务/日历领域逻辑，不含账户权益判定</td></tr>
+    </table>
+    <div class="meta">TickTickModels / TickTickUtils / TickTickDao 经逐成员扫描均不含 VIP 判定（REA Evidence ev_dea33030…、ev_5a932785…）。</div>
+  </div>
+  <div class="panel">
+    <h3>UserModel 权益字段（服务端下发，本地缓存）</h3>
+    <table>
+      <tr><th>字段</th><th>类型</th><th>用途</th></tr>
+      <tr><td><code>pro</code></td><td>bool</td><td>当前 Pro 状态标志</td></tr>
+      <tr><td><code>proEndDate</code></td><td>DateTime?</td><td>Pro 到期时间（判定主键）</td></tr>
+      <tr><td><code>teamPro / activeTeamUser</code></td><td>bool</td><td>团队版权益</td></tr>
+      <tr><td><code>gracePeriod / noGraceDate</code></td><td>bool? / DateTime?</td><td>到期宽限期</td></tr>
+      <tr><td><code>subscribeType / subscribeFreq</code></td><td>—</td><td>订阅方案与周期</td></tr>
+      <tr><td><code>needSubscribe</code></td><td>—</td><td>待订阅标记</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>三个核心判定函数（CIL 反编译还原）</h2>
+
+<div class="fn">
+  <div class="head"><span>UserManager.IsFreeUser — 是否免费用户</span><span class="tok">token 0x060065B7 · rva 0x1F3034</span></div>
+  <div class="body">
+<pre>if (_user == null)            return true;   // 未登录按免费处理
+if (_user.proEndDate == null)  return true;   // 从未付费
+return proEndDate.Value.Date &lt; DateTime.Now.AddYears(-20);  // 异常古老数据兜底</pre>
+    <div class="note">语义：区分「从未成为 Pro」与「曾是 Pro」。只要 proEndDate 有正常值（哪怕昨天刚到期）都不算免费用户。</div>
+  </div>
+</div>
+
+<div class="fn">
+  <div class="head"><span>UserManager.ProExpired — Pro 是否已过期</span><span class="tok">token 0x060065BC · rva 0x1F31A8</span></div>
+  <div class="body">
+<pre>if (_user?.proEndDate == null)     return false;  // 无 Pro 记录
+if (proEndDate.Value &gt;= DateTime.Now) return false;  // 未到期
+return proEndDate.Value.Date &gt; DateTime.Now.AddYears(-20);   // 到期 → 过期</pre>
+    <div class="note">这是 VIP 权益的总闸门：唯一的判断就是本地系统时间与本地存储的 proEndDate 比较。</div>
+  </div>
+</div>
+
+<div class="fn">
+  <div class="head"><span>UserManager.InGraceDate — 到期宽限期</span><span class="tok">token 0x060065C4 · rva 0x1F33A8</span></div>
+  <div class="body">
+<pre>if (_user?.gracePeriod != true)    return false;  // 服务端宽限开关
+if (proEndDate == null)              return false;
+if (proEndDate.Value &lt;= Now)         return false;  // 须仍未到期（推断：宽限展示窗口）
+if (_user?.noGraceDate == null)      return false;
+return noGraceDate.Value &lt;= Now;</pre>
+    <div class="note">配合 SubscriptionGraceDateMessage / subscriptiongracedatewindow.xaml，到期后给予宽限提示（noGraceDate 语义为推断）。</div>
+  </div>
+</div>
+
+<h2>UI 门控样例：头像 Pro 皇冠</h2>
+<pre>// LeftMenuBar.SetProCrown()  token 0x06001917
+if (Settings.IsPro &amp;&amp; !UserManager.InGraceDate()) {
+    HeadProImage.Visible;  HeadFreeImage.Collapsed;   // 显示 Pro 皇冠
+} else {
+    HeadProImage.Collapsed; HeadFreeImage.Visible;    // 显示免费标识
+}
+// Settings.IsPro → SettingsModel.IsPro（本地设置库，由登录/同步流程按 UserModel.pro 写入）
+// WPF 大量门控经由 XAML 数据绑定到各 ViewModel 的 IsPro 属性，IL 中无显式调用</pre>
+
+<h2>Pro 功能限制实施点矩阵</h2>
+<table>
+  <tr><th>功能面</th><th>免费/过期用户行为</th><th>限制机制与证据</th></tr>
+  <tr><td>头像 / 标识</td><td>显示免费标识，无皇冠</td><td>LeftMenuBar.SetProCrown 读 Settings.IsPro（token 0x06001917）</td></tr>
+  <tr><td>看板视图</td><td>过期后被重置回默认视图</td><td>UpgradeHelper.UpdateKanbanView（0x0600658D）</td></tr>
+  <tr><td>自定义 / 智能排序</td><td>过期后排序选项被降级</td><td>UpgradeHelper.UpdateSortOptions / UpdateSmartSortOptions / UpdateNewTaskSortOrders（0x06006590–92）</td></tr>
+  <tr><td>高级过滤规则</td><td>提示 FilterExpired*，规则失效</td><td>Filter.Parser.CheckFilterRuleExpired（0x06006DDC）</td></tr>
+  <tr><td>第三方日历订阅</td><td>CalendarExpired* / ThirdCalendarExpired 提示</td><td>CalendarService.CheckExpiredAccounts（0x06007041）</td></tr>
+  <tr><td>任务 / 清单计数</td><td>计数能力受 IsFreeUser 门控</td><td>ReloadProjectTaskCount / TryGetCount 等调用 IsFreeUser</td></tr>
+  <tr><td>Notion 块 / 标签类型 / 习惯跳过</td><td>过期后配置被降级</td><td>UpgradeHelper.UpdateTaskNotionBlocks / UpdateTagType / UpdateSkipHabit</td></tr>
+  <tr><td>项目数量</td><td>超限时弹升级引导</td><td>EditProjectDialog.TryUpgradeProject（0x060003E8）</td></tr>
+  <tr><td>团队协作</td><td>非 teamPro 降级（pro_expired_downgrade）</td><td>UserManager.IsTeamActive = activeTeamUser &amp;&amp; teamPro（0x060065B9）</td></tr>
+</table>
+
+<h2>触发时机与升级引导链</h2>
+<div class="grid2">
+  <div class="panel">
+    <h3>判定触发时机</h3>
+    <table>
+      <tr><th>时机</th><th>动作</th></tr>
+      <tr><td>登录后 CheckLoginStatus</td><td>调 IsFreeUser 初始化免费/付费计数策略</td></tr>
+      <tr><td>版本检查 CheckVersionValid</td><td>调 ProExpired + InGraceDate</td></tr>
+      <tr><td>过期确认</td><td>MainWindow.ShowProExpiredDialog 弹窗（0x0600032B）</td></tr>
+      <tr><td>启动 / 同步</td><td>InitProStatus、CheckProValid、CheckUserStatus 状态机</td></tr>
+    </table>
+  </div>
+  <div class="panel">
+    <h3>付费转化（PerformUpgrade 链）</h3>
+    <table>
+      <tr><th>环节</th><th>证据</th></tr>
+      <tr><td>支付窗口</td><td>views/upgrade/payprowindow.xaml</td></tr>
+      <tr><td>支付渠道</td><td>PayPal / Stripe / 支付宝 / 微信（四按钮）</td></tr>
+      <tr><td>方案</td><td>PremiumMonthly / PremiumYearly，/upgrade?teamId=</td></tr>
+      <tr><td>A/B 实验</td><td>ABTestManager：premium1_202403、premium2_202407_a/b/c/o1</td></tr>
+      <tr><td>埋点</td><td>UserActCollect.SendUpgradeShow/Prompt/Purchase Data</td></tr>
+      <tr><td>调试后门</td><td>DebugSettings.InitPremiumGroup 可切换付费分组（CurrentDebugPremiumGroup）</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>安全评估</h2>
+<div class="banner warn">
+  <b>客户端信任（Client-Side Trust）设计弱点。</b>
+  权益判定 = 本地字段 + 本地时间。绕过方式：① 篡改本地缓存的用户记录（TickTickDao + sqlite3.dll）将 pro / proEndDate 改为未来时间；
+  ② 补丁 ProExpired 与 IsFreeUser 的返回指令（各一处 ldc.i4）。二者均可解除全部 UI 层限制（皇冠、主题、看板、排序、过滤器）。
+</div>
+<p class="meta">服务端校验边界：清单数量、日历订阅数等数据写入类限制由 /api/v2/* 服务端复核，本地绕过无效——客户端补丁只能解锁「表现层」功能，无法伪造服务端配额。该结构属于典型的「UI 层信任客户端、配额层信任服务端」设计；风险敞口集中在表现层。</p>
+
+<div class="foot">
+  <b>证据与边界</b><br>
+  REA Evidence：ev_d37545c6…（程序集分类 managed PE/IL-only）、ev_ce1ce5d7…（主程序集超 64MB 表示预算，成员级证据改用同原则本地 CIL 静态解码：不加载不执行目标）、ev_dea33030…（TickTickModels 无 VIP 成员）、ev_5a932785…（Handler 为 C++/CLI 桥）。<br>
+  方法级结论均标注 metadata token 与 RVA，可在 dnSpy/ILSpy 中复核。<br>
+  未展开面：BAML/XAML 绑定的完整元素清单（20MB 资源段）；服务端 API 实际校验行为（超出静态分析范围）；InGraceDate 的 noGraceDate 语义为推断。
+</div>
+
+</div>
+</body>
+</html>
